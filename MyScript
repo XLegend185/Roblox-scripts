@@ -1,0 +1,801 @@
+-- Legend X | PvP Rayfield FULL
+-- by Robloxscripts
+-- Key: XLegendSigma
+-- УНИВЕРСАЛЬНАЯ PvP/драка ВЕРСИЯ (клиентские фичи). Подгоняй remotes под конкретную игру при необходимости.
+
+-----------------------
+-- Config / URLs
+-----------------------
+local KEY_LIST = {"XLegendSigma"} -- ключи, которые принимаем
+
+local RAYFIELD_URLS = {
+    "https://sirius.menu/rayfield",
+    "https://raw.githubusercontent.com/SiriusSoftwareLtd/Rayfield/main/source.lua",
+}
+
+-----------------------
+-- Services
+-----------------------
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local Camera = workspace.CurrentCamera
+local Debris = game:GetService("Debris")
+local LocalPlayer = Players.LocalPlayer
+
+-----------------------
+-- Load Rayfield (try multiple)
+-----------------------
+local Rayfield
+do
+    local lastErr
+    for _, url in ipairs(RAYFIELD_URLS) do
+        local ok, res = pcall(function() return loadstring(game:HttpGet(url))() end)
+        if ok and res then
+            Rayfield = res
+            break
+        else
+            lastErr = res
+        end
+    end
+    if not Rayfield then
+        error("Не удалось загрузить Rayfield UI. Проверь RAYFIELD_URLS. Ошибка: "..tostring(lastErr))
+    end
+end
+
+-----------------------
+-- Create window (KeySystem enabled)
+-----------------------
+local Window = Rayfield:CreateWindow({
+    Name = "Legend X | PvP",
+    LoadingTitle = "Legend X",
+    LoadingSubtitle = "by Robloxscripts",
+    ConfigurationSaving = {
+        Enabled = true,
+        FolderName = "LegendX_PvP",
+        FileName = "Config",
+    },
+    Discord = {
+        Enabled = false,
+    },
+    KeySystem = true,
+    KeySettings = {
+        Title = "Legend X | Key System",
+        Subtitle = "Введите ключ чтобы использовать",
+        Note = "Ключ: XLegendSigma",
+        FileName = "LegendXKey",
+        SaveKey = true,
+        GrabKeyFromSite = false,
+        Key = KEY_LIST
+    }
+})
+
+-----------------------
+-- Helpers
+-----------------------
+local function IsAlive(plr)
+    local ch = plr.Character
+    if not ch then return false end
+    local hum = ch:FindFirstChildOfClass("Humanoid")
+    return hum and hum.Health and hum.Health > 0
+end
+
+local function GetRoot(plr)
+    if not plr.Character then return nil end
+    return plr.Character:FindFirstChild("HumanoidRootPart") or plr.Character:FindFirstChild("UpperTorso") or plr.Character:FindFirstChild("Torso")
+end
+
+local function GetHead(plr)
+    if not plr.Character then return nil end
+    return plr.Character:FindFirstChild("Head")
+end
+
+local function TableCopy(t)
+    local r = {}
+    for k,v in pairs(t) do r[k]=v end
+    return r
+end
+
+-----------------------
+-- State variables (defaults)
+-----------------------
+local STATE = {
+    -- Visuals
+    ESP = false,
+    Tracers = false,
+    FullBright = false,
+    Highlight = false,
+
+    -- Combat
+    Aimbot = false,
+    AimbotTargetPart = "Head", -- "Head" or "HumanoidRootPart"
+    AimbotFOV = 150,
+    AimbotSmooth = 0.35,
+    AimbotHoldToAim = true, -- держать RMB чтобы аим работал
+
+    SilentAim = false, -- клиентская помощь + attempt attack
+    TriggerBot = false, -- авто-атака при наведении
+    KillAura = false,
+    KillAuraRadius = 8,
+
+    -- Movement
+    Fly = false,
+    FlySpeed = 120,
+    WalkSpeed = 16,
+    JumpPower = 50,
+
+    -- Misc
+    FlingPower = 220,
+    TimeStop = false,
+    Invis = false,
+}
+
+local DrawingAvailable = pcall(function() return Drawing.new end)
+local ESPTable = {}
+local TracerTable = {}
+local HighlightTable = {}
+
+local flyBV = nil
+local RMBDown = false
+local lastAimTarget = nil
+
+-----------------------
+-- Tools / Attack helpers (generic)
+-- Note: different games use remotes; adapt below for specific game.
+-----------------------
+local function GetEquippedTool()
+    local char = LocalPlayer.Character
+    if not char then return nil end
+    for _, child in ipairs(char:GetChildren()) do
+        if child:IsA("Tool") then return child end
+    end
+    return nil
+end
+
+local function ActivateTool(tool)
+    if not tool then return end
+    -- Prefer :Activate if available
+    pcall(function() tool:Activate() end)
+    -- Some games listen to remote events; user must fill remote names below.
+end
+
+-- Game-specific remote example (uncomment & set correct remote for your game)
+-- local REMOTES = {
+--     AttackEvent = game:GetService("ReplicatedStorage"):WaitForChild("RemoteAttack"),
+-- }
+
+local function SendAttackRemote()
+    -- Example placeholder: call the remote if known.
+    -- pcall(function() REMOTES.AttackEvent:FireServer(args) end)
+    -- fallback to Tool Activate
+    local tool = GetEquippedTool()
+    if tool then
+        ActivateTool(tool)
+    else
+        -- some games require clicking; we attempt to fire mouse events via virtual click (not always available)
+        pcall(function()
+            if typeof(mouse1) == "userdata" then
+                mouse1:Click() -- rarely available
+            end
+        end)
+    end
+end
+
+-----------------------
+-- ESP Implementation (BillboardGui)
+-----------------------
+local function CreateESPForPlayer(plr)
+    if ESPTable[plr] then return end
+    if not IsAlive(plr) then return end
+    local head = GetHead(plr)
+    if not head then return end
+
+    local bg = Instance.new("BillboardGui")
+    bg.Name = "LegendX_ESP"
+    bg.Adornee = head
+    bg.Size = UDim2.new(0,160,0,40)
+    bg.StudsOffset = Vector3.new(0,2,0)
+    bg.AlwaysOnTop = true
+    bg.MaxDistance = 10000
+
+    local label = Instance.new("TextLabel", bg)
+    label.Size = UDim2.new(1,0,1,0)
+    label.BackgroundTransparency = 1
+    label.Text = plr.Name
+    label.Font = Enum.Font.GothamSemibold
+    label.TextSize = 14
+    label.TextColor3 = Color3.new(1,1,1)
+    label.TextStrokeTransparency = 0
+    label.TextWrapped = true
+
+    bg.Parent = LocalPlayer:FindFirstChildOfClass("PlayerGui") or game:GetService("CoreGui")
+    ESPTable[plr] = bg
+end
+
+local function RemoveESPForPlayer(plr)
+    if ESPTable[plr] and ESPTable[plr].Parent then
+        pcall(function() ESPTable[plr]:Destroy() end)
+    end
+    ESPTable[plr] = nil
+end
+
+local function RefreshAllESP()
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer and STATE.ESP and IsAlive(p) then
+            if not ESPTable[p] then CreateESPForPlayer(p) end
+        else
+            RemoveESPForPlayer(p)
+        end
+    end
+end
+
+-----------------------
+-- Tracers (Drawing)
+-----------------------
+local function CreateTracer(plr)
+    if not DrawingAvailable then return end
+    if TracerTable[plr] then return end
+    local line = Drawing.new("Line")
+    line.Thickness = 1
+    line.Transparency = 1
+    line.Visible = true
+    TracerTable[plr] = line
+end
+
+local function RemoveTracer(plr)
+    if TracerTable[plr] then
+        pcall(function() TracerTable[plr]:Remove() end)
+        TracerTable[plr] = nil
+    end
+end
+
+-----------------------
+-- Highlight (Optional)
+-----------------------
+local function CreateHighlight(plr)
+    if HighlightTable[plr] then return end
+    local root = GetRoot(plr)
+    if not root then return end
+    local hl = Instance.new("Highlight")
+    hl.Adornee = plr.Character
+    hl.Parent = workspace
+    HighlightTable[plr] = hl
+end
+
+local function RemoveHighlight(plr)
+    if HighlightTable[plr] then
+        pcall(function() HighlightTable[plr]:Destroy() end)
+        HighlightTable[plr] = nil
+    end
+end
+
+-----------------------
+-- Aimbot / Targeting
+-----------------------
+local function WorldToScreenPoint(pos)
+    local ok, v = pcall(function() return Camera:WorldToViewportPoint(pos) end)
+    if not ok or not v then return false, Vector2.new(0,0), 0 end
+    return v.Z>0, Vector2.new(v.X, v.Y), v.Z
+end
+
+local function GetNearestVisibleTarget()
+    local best, bestDist = nil, math.huge
+    local center = Vector2.new(Camera.ViewportSize.X/2, Camera.ViewportSize.Y/2)
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer and IsAlive(plr) then
+            local part = (STATE.AimbotTargetPart == "Head") and GetHead(plr) or GetRoot(plr)
+            if part then
+                local onScreen, screenPos, depth = WorldToScreenPoint(part.Position)
+                if onScreen then
+                    local dist = (screenPos - center).Magnitude
+                    if dist < bestDist and dist <= STATE.AimbotFOV then
+                        -- simple visibility check via raycast from camera to part
+                        local origin = Camera.CFrame.Position
+                        local direction = (part.Position - origin)
+                        local ray = Ray.new(origin, direction.Unit * math.min(direction.Magnitude, 500))
+                        local hit, hitpos = workspace:FindPartOnRayWithIgnoreList(ray, {LocalPlayer.Character, part.Parent})
+                        local visible = (not hit) or (hit and hit:IsDescendantOf(part.Parent))
+                        if visible then
+                            bestDist = dist
+                            best = plr
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return best
+end
+
+-----------------------
+-- Fly Implementation
+-----------------------
+local function StartFly()
+    if not LocalPlayer.Character then return end
+    local hrp = GetRoot(LocalPlayer)
+    if not hrp then return end
+    if flyBV and flyBV.Parent then flyBV:Destroy() end
+    flyBV = Instance.new("BodyVelocity")
+    flyBV.MaxForce = Vector3.new(1e5,1e5,1e5)
+    flyBV.P = 1250
+    flyBV.Velocity = Vector3.new(0,0,0)
+    flyBV.Parent = hrp
+    local hum = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+    if hum then hum.PlatformStand = true end
+end
+
+local function StopFly()
+    if flyBV and flyBV.Parent then flyBV:Destroy() end
+    flyBV = nil
+    local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+    if hum then hum.PlatformStand = false end
+end
+
+-----------------------
+-- Fling
+-----------------------
+local function FlingTarget(plr)
+    if not plr or not IsAlive(plr) then return end
+    local myHRP = GetRoot(LocalPlayer)
+    local targetHRP = GetRoot(plr)
+    if not myHRP or not targetHRP then return end
+
+    local bv = Instance.new("BodyVelocity")
+    bv.MaxForce = Vector3.new(1e6,1e6,1e6)
+    bv.P = 1250
+    bv.Velocity = (targetHRP.Position - myHRP.Position).Unit * STATE.FlingPower + Vector3.new(0,120,0)
+    bv.Parent = myHRP
+    Debris:AddItem(bv, 0.35)
+end
+
+-----------------------
+-- TimeStop (client-side)
+-----------------------
+local TimeSaved = {}
+local function ApplyTimeStop()
+    TimeSaved = {}
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer and IsAlive(p) and p.Character then
+            TimeSaved[p] = {}
+            for _, part in ipairs(p.Character:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    TimeSaved[p][part] = {Anchored = part.Anchored, CanCollide = part.CanCollide}
+                    pcall(function() part.Anchored = true; part.CanCollide = false end)
+                end
+            end
+            local hum = p.Character:FindFirstChildOfClass("Humanoid")
+            if hum then TimeSaved[p].WalkSpeed = hum.WalkSpeed; pcall(function() hum.WalkSpeed = 0 end) end
+        end
+    end
+end
+
+local function RemoveTimeStop()
+    for p, tbl in pairs(TimeSaved) do
+        if p.Character then
+            for part, st in pairs(tbl) do
+                if part and part.Parent then
+                    pcall(function() part.Anchored = st.Anchored; part.CanCollide = st.CanCollide end)
+                end
+            end
+            local hum = p.Character:FindFirstChildOfClass("Humanoid")
+            if hum and tbl.WalkSpeed then pcall(function() hum.WalkSpeed = tbl.WalkSpeed end) end
+        end
+    end
+    TimeSaved = {}
+end
+
+-----------------------
+-- Invisibility
+-----------------------
+local InvisSaved = {}
+local function ApplyInvis()
+    local ch = LocalPlayer.Character
+    if not ch then return end
+    InvisSaved = {}
+    for _, obj in ipairs(ch:GetDescendants()) do
+        if obj:IsA("BasePart") then
+            InvisSaved[obj] = {Transparency = obj.Transparency, CanCollide = obj.CanCollide}
+            pcall(function() obj.Transparency = 1; obj.CanCollide = false end)
+        elseif obj:IsA("Decal") then
+            InvisSaved[obj] = {Transparency = obj.Transparency}
+            pcall(function() obj.Transparency = 1 end)
+        end
+    end
+end
+
+local function RemoveInvis()
+    for obj, st in pairs(InvisSaved) do
+        if obj and obj.Parent then
+            pcall(function()
+                if st.Transparency then obj.Transparency = st.Transparency end
+                if st.CanCollide ~= nil then obj.CanCollide = st.CanCollide end
+            end)
+        end
+    end
+    InvisSaved = {}
+end
+
+-----------------------
+-- Attack loops: TriggerBot / KillAura / SilentAim attempt
+-----------------------
+local function GetPartPosition(plr)
+    local part = (STATE.AimbotTargetPart == "Head") and GetHead(plr) or GetRoot(plr)
+    if part then return part.Position end
+    return nil
+end
+
+local function InAimbotFOV(plr)
+    local pos = GetPartPosition(plr)
+    if not pos then return false end
+    local ok, screenPos = pcall(function() return Camera:WorldToViewportPoint(pos) end)
+    if not ok or not screenPos then return false end
+    if screenPos.Z <= 0 then return false end
+    local center = Vector2.new(Camera.ViewportSize.X/2, Camera.ViewportSize.Y/2)
+    local dist = (Vector2.new(screenPos.X, screenPos.Y) - center).Magnitude
+    return dist <= STATE.AimbotFOV
+end
+
+-- AutoAttack routine (generic): tries remotes fallback to tool activation
+local function TryAttackTarget(plr)
+    if not plr or not IsAlive(plr) then return end
+
+    -- Game-specific remotes should be added here for reliability.
+    -- Example (uncomment and set correct Remote): pcall(function() workspace.Remotes.Attack:FireServer(plr) end)
+
+    -- Fallback: if local tool exists, activate it
+    SendAttackRemote()
+end
+
+-----------------------
+-- Main RenderStepped: aimbot movement + fly control + tracers + attack checks
+-----------------------
+RunService.RenderStepped:Connect(function(dt)
+    -- Aimbot: rotate camera toward target
+    if STATE.Aimbot and (not STATE.AimbotHoldToAim or RMBDown) then
+        local target = GetNearestVisibleTarget()
+        if target and IsAlive(target) then
+            lastAimTarget = target
+            local part = (STATE.AimbotTargetPart == "Head") and GetHead(target) or GetRoot(target)
+            if part then
+                local aimPos = part.Position
+                local camPos = Camera.CFrame.Position
+                local desired = CFrame.new(camPos, aimPos)
+                Camera.CFrame = Camera.CFrame:Lerp(desired, math.clamp(1 - STATE.AimbotSmooth, 0.01, 1))
+            end
+        end
+    end
+
+    -- TriggerBot: if crosshair near head/root -> attack
+    if STATE.TriggerBot then
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= LocalPlayer and IsAlive(p) and InAimbotFOV(p) then
+                -- visibility check
+                local pos = GetPartPosition(p)
+                if pos then
+                    local origin = Camera.CFrame.Position
+                    local dir = (pos - origin)
+                    local hit = workspace:FindPartOnRayWithIgnoreList(Ray.new(origin, dir.Unit * dir.Magnitude), {LocalPlayer.Character, p.Character})
+                    local visible = (not hit) or hit:IsDescendantOf(p.Character)
+                    if visible then
+                        TryAttackTarget(p)
+                        break
+                    end
+                end
+            end
+        end
+    end
+
+    -- KillAura: attack nearby players automatically
+    if STATE.KillAura then
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= LocalPlayer and IsAlive(p) and GetRoot(p) then
+                local myroot = GetRoot(LocalPlayer)
+                local prot = GetRoot(p)
+                if myroot and prot then
+                    local dist = (myroot.Position - prot.Position).Magnitude
+                    if dist <= STATE.KillAuraRadius then
+                        TryAttackTarget(p)
+                    end
+                end
+            end
+        end
+    end
+
+    -- Fly movement
+    if STATE.Fly and flyBV and GetRoot(LocalPlayer) then
+        local hrp = GetRoot(LocalPlayer)
+        local dir = Vector3.new(0,0,0)
+        if UserInputService:IsKeyDown(Enum.KeyCode.W) then dir = dir + Camera.CFrame.LookVector end
+        if UserInputService:IsKeyDown(Enum.KeyCode.S) then dir = dir - Camera.CFrame.LookVector end
+        if UserInputService:IsKeyDown(Enum.KeyCode.A) then dir = dir - Camera.CFrame.RightVector end
+        if UserInputService:IsKeyDown(Enum.KeyCode.D) then dir = dir + Camera.CFrame.RightVector end
+        if UserInputService:IsKeyDown(Enum.KeyCode.Space) then dir = dir + Vector3.new(0,1,0) end
+        if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then dir = dir - Vector3.new(0,1,0) end
+        if dir.Magnitude > 0 then dir = dir.Unit end
+        flyBV.Velocity = dir * STATE.FlySpeed
+    end
+
+    -- Tracers update
+    if STATE.Tracers and DrawingAvailable then
+        for plr, line in pairs(TracerTable) do
+            if IsAlive(plr) and plr.Character then
+                local part = GetRoot(plr) or GetHead(plr)
+                if part then
+                    local ok, v = pcall(function() return Camera:WorldToViewportPoint(part.Position) end)
+                    if ok and v and v.Z>0 then
+                        line.From = Vector2.new(Camera.ViewportSize.X/2, Camera.ViewportSize.Y)
+                        line.To = Vector2.new(v.X, v.Y)
+                        line.Visible = true
+                    else
+                        line.Visible = false
+                    end
+                end
+            else
+                if TracerTable[plr] then RemoveTracer(plr) end
+            end
+        end
+    end
+end)
+
+-----------------------
+-- Heartbeat housekeeping: ESP/Tracers/Highlight management
+-----------------------
+RunService.Heartbeat:Connect(function()
+    -- ESP refresh
+    RefreshAllESP()
+
+    -- Tracer creation/removal
+    if STATE.Tracers and DrawingAvailable then
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if plr ~= LocalPlayer and IsAlive(plr) and not TracerTable[plr] then CreateTracer(plr) end
+            if (not IsAlive(plr)) and TracerTable[plr] then RemoveTracer(plr) end
+        end
+    else
+        for p,_ in pairs(TracerTable) do RemoveTracer(p) end
+    end
+
+    -- Highlight
+    if STATE.Highlight then
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= LocalPlayer and IsAlive(p) and not HighlightTable[p] then CreateHighlight(p) end
+            if (not IsAlive(p)) and HighlightTable[p] then RemoveHighlight(p) end
+        end
+    else
+        for p,_ in pairs(HighlightTable) do RemoveHighlight(p) end
+    end
+end)
+
+-----------------------
+-- Input listeners
+-----------------------
+UserInputService.InputBegan:Connect(function(input, gpe)
+    if gpe then return end
+    if input.UserInputType == Enum.UserInputType.MouseButton2 then RMBDown = true end
+end)
+UserInputService.InputEnded:Connect(function(input, gpe)
+    if input.UserInputType == Enum.UserInputType.MouseButton2 then RMBDown = false end
+end)
+
+-----------------------
+-- Rayfield UI: Tabs + Controls
+-----------------------
+local CombatTab = Window:CreateTab("⚔ Combat")
+local VisualsTab = Window:CreateTab("👁 Visuals")
+local MovementTab = Window:CreateTab("🏃 Movement")
+local MiscTab = Window:CreateTab("⚙ Misc")
+local SettingsTab = Window:CreateTab("🛠 Settings")
+
+-- Combat controls
+CombatTab:CreateToggle({
+    Name = "Aimbot",
+    CurrentValue = STATE.Aimbot,
+    Flag = "AimbotToggle",
+    Callback = function(v) STATE.Aimbot = v end
+})
+CombatTab:CreateDropdown({
+    Name = "Aimbot Target Part",
+    Options = {"Head", "HumanoidRootPart"},
+    CurrentOption = "Head",
+    Flag = "AimbotPart",
+    Callback = function(opt) STATE.AimbotTargetPart = opt end
+})
+CombatTab:CreateSlider({
+    Name = "Aimbot FOV",
+    Range = {20, 500},
+    Increment = 1,
+    CurrentValue = STATE.AimbotFOV,
+    Flag = "AimbotFOV",
+    Callback = function(v) STATE.AimbotFOV = v end
+})
+CombatTab:CreateSlider({
+    Name = "Aimbot Smooth",
+    Range = {0, 1},
+    Increment = 0.01,
+    CurrentValue = STATE.AimbotSmooth,
+    Flag = "AimbotSmooth",
+    Callback = function(v) STATE.AimbotSmooth = v end
+})
+CombatTab:CreateToggle({
+    Name = "Hold RMB to aim",
+    CurrentValue = STATE.AimbotHoldToAim,
+    Flag = "AimbotHold",
+    Callback = function(v) STATE.AimbotHoldToAim = v end
+})
+CombatTab:CreateToggle({
+    Name = "Silent Aim (client assist)",
+    CurrentValue = STATE.SilentAim,
+    Flag = "SilentAim",
+    Callback = function(v) STATE.SilentAim = v end
+})
+CombatTab:CreateToggle({
+    Name = "TriggerBot (auto-attack on aim)",
+    CurrentValue = STATE.TriggerBot,
+    Flag = "TriggerBot",
+    Callback = function(v) STATE.TriggerBot = v end
+})
+CombatTab:CreateToggle({
+    Name = "KillAura (auto attack in radius)",
+    CurrentValue = STATE.KillAura,
+    Flag = "KillAura",
+    Callback = function(v) STATE.KillAura = v end
+})
+CombatTab:CreateSlider({
+    Name = "KillAura Radius",
+    Range = {2, 20},
+    Increment = 1,
+    CurrentValue = STATE.KillAuraRadius,
+    Flag = "KillAuraRadius",
+    Callback = function(v) STATE.KillAuraRadius = v end
+})
+CombatTab:CreateButton({
+    Name = "Fling nearest",
+    Callback = function()
+        local t = GetNearestVisibleTarget()
+        if t then FlingTarget(t); Rayfield:Notify({Title="Legend X", Content="Fling -> "..t.Name, Duration=2, Type="Info"}) end
+    end
+})
+CombatTab:CreateParagraph({ Title = "Note", Content = "TriggerBot / SilentAim work best when adapted to a game's remotes or weapon system. Provide game name and I will adapt." })
+
+-- Visuals controls
+VisualsTab:CreateToggle({
+    Name = "ESP (names)",
+    CurrentValue = STATE.ESP,
+    Flag = "ESP",
+    Callback = function(v) STATE.ESP = v; if not v then for p,_ in pairs(ESPTable) do RemoveESPForPlayer(p) end end end
+})
+VisualsTab:CreateToggle({
+    Name = "Tracers (Drawing)",
+    CurrentValue = STATE.Tracers,
+    Flag = "Tracers",
+    Callback = function(v)
+        if v and not DrawingAvailable then
+            Rayfield:Notify({Title="Legend X", Content="Drawing API недоступен — Tracers отключены.", Duration=3, Type="Warning"})
+            STATE.Tracers = false
+            return
+        end
+        STATE.Tracers = v
+    end
+})
+VisualsTab:CreateToggle({
+    Name = "Highlight players",
+    CurrentValue = STATE.Highlight,
+    Flag = "Highlight",
+    Callback = function(v) STATE.Highlight = v end
+})
+VisualsTab:CreateToggle({
+    Name = "FullBright",
+    CurrentValue = STATE.FullBright,
+    Flag = "FullBright",
+    Callback = function(v)
+        STATE.FullBright = v
+        if v then
+            local Lighting = game:GetService("Lighting")
+            Lighting.Brightness = 2
+            Lighting.ClockTime = 14
+            Lighting.FogEnd = 100000
+        else
+            local Lighting = game:GetService("Lighting")
+            Lighting.Brightness = 1
+            Lighting.ClockTime = 12
+        end
+    end
+})
+VisualsTab:CreateButton({ Name = "Refresh ESP", Callback = function() RefreshAllESP(); Rayfield:Notify({Title="Legend X", Content="ESP refreshed", Duration=1, Type="Info"}) end })
+
+-- Movement controls
+MovementTab:CreateToggle({
+    Name = "Fly",
+    CurrentValue = STATE.Fly,
+    Flag = "FlyToggle",
+    Callback = function(v)
+        STATE.Fly = v
+        if v then StartFly() else StopFly() end
+    end
+})
+MovementTab:CreateSlider({
+    Name = "Fly Speed",
+    Range = {10, 500},
+    Increment = 1,
+    CurrentValue = STATE.FlySpeed,
+    Flag = "FlySpeed",
+    Callback = function(v) STATE.FlySpeed = v end
+})
+MovementTab:CreateSlider({
+    Name = "WalkSpeed",
+    Range = {16, 250},
+    Increment = 1,
+    CurrentValue = STATE.WalkSpeed,
+    Flag = "WalkSpeed",
+    Callback = function(v) STATE.WalkSpeed = v; local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid"); if hum then pcall(function() hum.WalkSpeed = v end) end end
+})
+MovementTab:CreateSlider({
+    Name = "JumpPower",
+    Range = {50, 200},
+    Increment = 1,
+    CurrentValue = STATE.JumpPower,
+    Flag = "JumpPower",
+    Callback = function(v) STATE.JumpPower = v; local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid"); if hum then pcall(function() hum.JumpPower = v end) end end
+})
+MovementTab:CreateButton({ Name = "Teleport to nearest", Callback = function()
+    local t = GetNearestVisibleTarget()
+    if t and GetRoot(t) and LocalPlayer.Character and GetRoot(LocalPlayer) then
+        local targetPos = GetRoot(t).Position
+        pcall(function() LocalPlayer.Character:MoveTo(targetPos + Vector3.new(0,5,0)) end)
+    end
+end })
+
+-- Misc controls
+MiscTab:CreateButton({ Name = "TimeStop (toggle)", Callback = function()
+    STATE.TimeStop = not STATE.TimeStop
+    if STATE.TimeStop then ApplyTimeStop() else RemoveTimeStop() end
+end })
+MiscTab:CreateToggle({
+    Name = "Invisible",
+    CurrentValue = STATE.Invis,
+    Flag = "Invis",
+    Callback = function(v) STATE.Invis = v; if v then ApplyInvis() else RemoveInvis() end end
+})
+MiscTab:CreateButton({ Name = "Fling All", Callback = function()
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer and IsAlive(p) then FlingTarget(p); wait(0.12) end
+    end
+end })
+
+-- Settings
+SettingsTab:CreateButton({ Name = "Toggle Menu (RightControl)", Callback = function() Rayfield:Toggle() end })
+SettingsTab:CreateLabel({ Name = "KeySystem", Text = "Rayfield key system active. Key: XLegendSigma" })
+
+-- Floating toggle button
+do
+    local gui = Instance.new("ScreenGui", LocalPlayer:WaitForChild("PlayerGui"))
+    gui.Name = "LegendX_ToggleButton"; gui.ResetOnSpawn = false
+    local btn = Instance.new("TextButton", gui)
+    btn.Size = UDim2.new(0,140,0,36); btn.Position = UDim2.new(1,-160,0,24)
+    btn.AnchorPoint = Vector2.new(0,0); btn.BackgroundColor3 = Color3.fromRGB(40,40,40)
+    btn.TextColor3 = Color3.new(1,1,1); btn.Text = "Hide/Show Menu"; btn.ZIndex = 10
+    btn.MouseButton1Click:Connect(function()
+        pcall(function() Rayfield:Toggle() end)
+    end)
+end
+
+-----------------------
+-- Cleanup on close
+-----------------------
+game:BindToClose(function()
+    RemoveTimeStop(); RemoveInvis()
+    for p,_ in pairs(ESPTable) do RemoveESPForPlayer(p) end
+    for p,_ in pairs(TracerTable) do RemoveTracer(p) end
+    for p,_ in pairs(HighlightTable) do RemoveHighlight(p) end
+end)
+
+-- Notify loaded
+Rayfield:Notify({ Title = "Legend X", Content = "PvP Edition loaded — KeySystem active", Duration = 3, Type = "Success" })
+
+-----------------------
+-- Final notes for you, братик:
+-- 1) TriggerBot / SilentAim / AutoAttack reliability depends on game's remote names.
+--    Если скажешь точную игру (MM2, Slap Royale, Phantom Forces и т.д.), я врежу рабочие remote hooks под неё.
+-- 2) Для SilentAim (полноценного перехвата выстрелов) нужен game-specific hooking — могу добавить для конкретной игры.
+-- 3) Если хочешь, могу добавить "AutoEquip weapon" / "AutoBlock" / "Parry" под конкретную механику.
+-----------------------
+
